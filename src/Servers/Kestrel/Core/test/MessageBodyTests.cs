@@ -1255,6 +1255,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
                 reader.Complete();
                 reader.AdvanceTo(readResult.Buffer.End);
 
+                // Verify reads don't throw
+                reader.TryRead(out readResult);
+
                 await body.StopAsync();
             }
         }
@@ -1279,6 +1282,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
 
                 reader.Complete();
 
+                // Verify reads don't throw
+                reader.TryRead(out readResult);
+
                 await body.StopAsync();
             }
         }
@@ -1302,6 +1308,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
                 input.Add("asdf");
 
                 reader.Complete();
+
+                // Verify reads don't throw
+                reader.TryRead(out readResult);
 
                 await body.StopAsync();
             }

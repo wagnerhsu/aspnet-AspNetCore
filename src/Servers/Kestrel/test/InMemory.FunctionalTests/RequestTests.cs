@@ -65,7 +65,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
 
             await using (var server = new TestServer(async context =>
             {
-                // This will hang if 0 content length is not assumed by the server
                 context.Request.BodyReader.Complete();
                 await Task.CompletedTask;
             }, testContext))
@@ -86,6 +85,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
                         "");
                 }
             }
+
             Assert.All(TestSink.Writes, w => Assert.InRange(w.LogLevel, LogLevel.Trace, LogLevel.Information));
         }
 
