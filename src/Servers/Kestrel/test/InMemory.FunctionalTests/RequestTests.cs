@@ -1524,50 +1524,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
         }
 
         [Fact]
-        public async Task ContentLengthRequestCallCompleteThrowsExceptionOnRead()
-        {
-            var testContext = new TestServiceContext(LoggerFactory);
-
-            await using (var server = new TestServer(async httpContext =>
-            {
-                var response = httpContext.Response;
-                var request = httpContext.Request;
-
-                Assert.Equal("POST", request.Method);
-
-                var readResult = await request.BodyReader.ReadAsync();
-                request.BodyReader.AdvanceTo(readResult.Buffer.End);
-
-                httpContext.Request.BodyReader.Complete();
-
-                await Assert.ThrowsAsync<InvalidOperationException>(async () => await request.BodyReader.ReadAsync());
-
-                response.Headers["Content-Length"] = new[] { "11" };
-
-                await response.BodyWriter.WriteAsync(new Memory<byte>(Encoding.ASCII.GetBytes("Hello World"), 0, 11));
-
-            }, testContext))
-            {
-                using (var connection = server.CreateConnection())
-                {
-                    await connection.Send(
-                        "POST / HTTP/1.1",
-                        "Host:",
-                        "Content-Length: 5",
-                        "",
-                        "Hello");
-
-                    await connection.Receive(
-                        "HTTP/1.1 200 OK",
-                        $"Date: {testContext.DateHeaderValue}",
-                        "Content-Length: 11",
-                        "",
-                        "Hello World");
-                }
-            }
-        }
-
-        [Fact]
         public async Task ContentLengthCallCompleteWithExceptionCauses500()
         {
             var tcs = new TaskCompletionSource<object>();
