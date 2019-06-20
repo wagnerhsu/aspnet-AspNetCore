@@ -20,7 +20,8 @@ namespace Microsoft.AspNetCore.Mvc.Formatters
         /// Initializes a new instance of <see cref="SystemTextJsonInputFormatter"/>.
         /// </summary>
         /// <param name="options">The <see cref="JsonOptions"/>.</param>
-        public SystemTextJsonInputFormatter(JsonOptions options)
+        public SystemTextJsonInputFormatter(
+            JsonOptions options)
         {
             SerializerOptions = options.JsonSerializerOptions;
 
