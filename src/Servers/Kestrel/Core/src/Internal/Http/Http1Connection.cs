@@ -34,11 +34,19 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
         private HttpRequestTarget _requestTargetForm = HttpRequestTarget.Unknown;
         private Uri _absoluteRequestTarget;
 
+        // The _parsed fields cache the Path, QueryString, RawTarget, and/or _absoluteRequestTarget
+        // from the previous request when DisableStringReuse is false.
+        private string _parsedPath = null;
+        private string _parsedQueryString = null;
+        private string _parsedRawTarget = null;
+        private Uri _parsedAbsoluteRequestTarget;
+
         private int _remainingRequestHeadersBytesAllowed;
 
         public Http1Connection(HttpConnectionContext context)
-            : base(context)
         {
+            Initialize(context);
+
             _context = context;
             _parser = ServiceContext.HttpParser;
             _keepAliveTicks = ServerOptions.Limits.KeepAliveTimeout.Ticks;
@@ -131,7 +139,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
             SendTimeoutResponse();
         }
 
-        public void ParseRequest(ReadOnlySequence<byte> buffer, out SequencePosition consumed, out SequencePosition examined)
+        public void ParseRequest(in ReadOnlySequence<byte> buffer, out SequencePosition consumed, out SequencePosition examined)
         {
             consumed = buffer.Start;
             examined = buffer.End;
@@ -151,10 +159,8 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
                 case RequestProcessingStatus.ParsingRequestLine:
                     if (TakeStartLine(buffer, out consumed, out examined))
                     {
-                        buffer = buffer.Slice(consumed, buffer.End);
-
-                        _requestProcessingStatus = RequestProcessingStatus.ParsingHeaders;
-                        goto case RequestProcessingStatus.ParsingHeaders;
+                        TrimAndParseHeaders(buffer, ref consumed, out examined);
+                        return;
                     }
                     else
                     {
@@ -167,24 +173,42 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
                     }
                     break;
             }
+
+            void TrimAndParseHeaders(in ReadOnlySequence<byte> buffer, ref SequencePosition consumed, out SequencePosition examined)
+            {
+                var trimmedBuffer = buffer.Slice(consumed, buffer.End);
+                _requestProcessingStatus = RequestProcessingStatus.ParsingHeaders;
+
+                if (TakeMessageHeaders(trimmedBuffer, trailers: false, out consumed, out examined))
+                {
+                    _requestProcessingStatus = RequestProcessingStatus.AppStarted;
+                }
+            }
         }
 
-        public bool TakeStartLine(ReadOnlySequence<byte> buffer, out SequencePosition consumed, out SequencePosition examined)
+        public bool TakeStartLine(in ReadOnlySequence<byte> buffer, out SequencePosition consumed, out SequencePosition examined)
         {
-            var overLength = false;
+            // Make sure the buffer is limited
             if (buffer.Length >= ServerOptions.Limits.MaxRequestLineSize)
             {
-                buffer = buffer.Slice(buffer.Start, ServerOptions.Limits.MaxRequestLineSize);
-                overLength = true;
+                // Input oversize, cap amount checked
+                return TrimAndTakeStartLine(buffer, out consumed, out examined);
             }
 
-            var result = _parser.ParseRequestLine(new Http1ParsingHandler(this), buffer, out consumed, out examined);
-            if (!result && overLength)
+            return _parser.ParseRequestLine(new Http1ParsingHandler(this), buffer, out consumed, out examined);
+
+            bool TrimAndTakeStartLine(in ReadOnlySequence<byte> buffer, out SequencePosition consumed, out SequencePosition examined)
             {
-                BadHttpRequestException.Throw(RequestRejectionReason.RequestLineTooLong);
-            }
+                var trimmedBuffer = buffer.Slice(buffer.Start, ServerOptions.Limits.MaxRequestLineSize);
 
-            return result;
+                if (!_parser.ParseRequestLine(new Http1ParsingHandler(this), trimmedBuffer, out consumed, out examined))
+                {
+                    // We read the maximum allowed but didn't complete the start line.
+                    BadHttpRequestException.Throw(RequestRejectionReason.RequestLineTooLong);
+                }
+
+                return true;
+            }
         }
 
         public bool TakeMessageHeaders(in ReadOnlySequence<byte> buffer, bool trailers, out SequencePosition consumed, out SequencePosition examined)
@@ -192,6 +216,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
             // Make sure the buffer is limited
             if (buffer.Length > _remainingRequestHeadersBytesAllowed)
             {
+                // Input oversize, cap amount checked
                 return TrimAndTakeMessageHeaders(buffer, trailers, out consumed, out examined);
             }
 
@@ -270,13 +295,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
                 // origin-form.
                 // The most common form of request-target.
                 // https://tools.ietf.org/html/rfc7230#section-5.3.1
-                OnOriginFormTarget(method, version, target, path, query, customMethod, pathEncoded);
+                OnOriginFormTarget(pathEncoded, target, path, query);
             }
             else if (ch == ByteAsterisk && target.Length == 1)
             {
                 OnAsteriskFormTarget(method);
             }
-            else if (target.GetKnownHttpScheme(out var scheme))
+            else if (target.GetKnownHttpScheme(out _))
             {
                 OnAbsoluteFormTarget(target, query);
             }
@@ -304,7 +329,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
         }
 
         // Compare with Http2Stream.TryValidatePseudoHeaders
-        private void OnOriginFormTarget(HttpMethod method, HttpVersion version, Span<byte> target, Span<byte> path, Span<byte> query, Span<byte> customMethod, bool pathEncoded)
+        private void OnOriginFormTarget(bool pathEncoded, Span<byte> target, Span<byte> path, Span<byte> query)
         {
             Debug.Assert(target[0] == ByteForwardSlash, "Should only be called when path starts with /");
 
@@ -320,6 +345,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
                 // Clear parsedData as we won't check it if we come via this path again,
                 // an setting to null is fast as it doesn't need to use a GC write barrier.
                 _parsedRawTarget = _parsedPath = _parsedQueryString = null;
+                _parsedAbsoluteRequestTarget = null;
                 return;
             }
 
@@ -372,6 +398,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
                     Path = _parsedPath;
                     QueryString = _parsedQueryString;
                 }
+
+                // Clear parsedData for absolute target as we won't check it if we come via this path again,
+                // an setting to null is fast as it doesn't need to use a GC write barrier.
+                _parsedAbsoluteRequestTarget = null;
             }
             catch (InvalidOperationException)
             {
@@ -424,9 +454,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
 
             Path = string.Empty;
             QueryString = string.Empty;
-            // Clear parsedData for path and queryString as we won't check it if we come via this path again,
+            // Clear parsedData for path, queryString and absolute target as we won't check it if we come via this path again,
             // an setting to null is fast as it doesn't need to use a GC write barrier.
             _parsedPath = _parsedQueryString = null;
+            _parsedAbsoluteRequestTarget = null;
         }
 
         private void OnAsteriskFormTarget(HttpMethod method)
@@ -446,6 +477,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
             // Clear parsedData as we won't check it if we come via this path again,
             // an setting to null is fast as it doesn't need to use a GC write barrier.
             _parsedRawTarget = _parsedPath = _parsedQueryString = null;
+            _parsedAbsoluteRequestTarget = null;
         }
 
         private void OnAbsoluteFormTarget(Span<byte> target, Span<byte> query)
@@ -480,7 +512,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
                     ThrowRequestTargetRejected(target);
                 }
 
-                _absoluteRequestTarget = uri;
+                _absoluteRequestTarget = _parsedAbsoluteRequestTarget = uri;
                 Path = _parsedPath = uri.LocalPath;
                 // don't use uri.Query because we need the unescaped version
                 previousValue = _parsedQueryString;
@@ -503,6 +535,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
                 RawTarget = _parsedRawTarget;
                 Path = _parsedPath;
                 QueryString = _parsedQueryString;
+                _absoluteRequestTarget = _parsedAbsoluteRequestTarget;
             }
         }
 

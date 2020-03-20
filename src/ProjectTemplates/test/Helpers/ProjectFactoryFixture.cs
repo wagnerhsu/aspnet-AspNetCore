@@ -48,7 +48,7 @@ namespace Templates.Test.Helpers
                         NodeLock = NodeLock,
                         Output = outputHelper,
                         DiagnosticsMessageSink = DiagnosticsMessageSink,
-                        ProjectGuid = Guid.NewGuid().ToString("N").Substring(0, 6)
+                        ProjectGuid = Path.GetRandomFileName().Replace(".", string.Empty)
                     };
                     project.ProjectName = $"AspNet.{key}.{project.ProjectGuid}";
 
@@ -61,9 +61,11 @@ namespace Templates.Test.Helpers
         }
 
         private static string GetTemplateFolderBasePath(Assembly assembly) =>
-            assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+            (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HELIX_DIR"))) 
+            ? assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
                 .Single(a => a.Key == "TestTemplateCreationFolder")
-                .Value;
+                .Value
+            : Path.Combine(Environment.GetEnvironmentVariable("HELIX_DIR"), "Templates", "BaseFolder");
 
         public void Dispose()
         {

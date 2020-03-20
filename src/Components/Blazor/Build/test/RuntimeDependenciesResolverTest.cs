@@ -6,15 +6,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
-using Microsoft.AspNetCore.Testing.xunit;
+using Microsoft.AspNetCore.Testing;
 using Xunit;
 
-namespace Microsoft.AspNetCore.Blazor.Build.Test
+namespace Microsoft.AspNetCore.Blazor.Build
 {
     public class RuntimeDependenciesResolverTest
     {
-        [ConditionalFact]
-        [SkipOnHelix("https://github.com/aspnet/AspNetCore/issues/10426")]
+        [ConditionalFact(Skip = " https://github.com/dotnet/aspnetcore/issues/12059")]
+        [SkipOnHelix("https://github.com/dotnet/aspnetcore/issues/10426")]
         public void FindsReferenceAssemblyGraph_ForStandaloneApp()
         {
             // Arrange
@@ -30,7 +30,7 @@ namespace Microsoft.AspNetCore.Blazor.Build.Test
             var references = new[]
             {
                 "Microsoft.AspNetCore.Blazor.dll",
-                "Microsoft.AspNetCore.Components.Browser.dll",
+                "Microsoft.AspNetCore.Components.Web.dll",
                 "Microsoft.AspNetCore.Components.dll",
                 "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
                 "Microsoft.Extensions.DependencyInjection.dll",
@@ -59,8 +59,8 @@ namespace Microsoft.AspNetCore.Blazor.Build.Test
                  */
                 "Microsoft.AspNetCore.Blazor.dll",
                 "Microsoft.AspNetCore.Blazor.pdb",
-                "Microsoft.AspNetCore.Components.Browser.dll",
-                "Microsoft.AspNetCore.Components.Browser.pdb",
+                "Microsoft.AspNetCore.Components.Web.dll",
+                "Microsoft.AspNetCore.Components.Web.pdb",
                 "Microsoft.AspNetCore.Components.dll",
                 "Microsoft.AspNetCore.Components.pdb",
                 "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
@@ -73,6 +73,7 @@ namespace Microsoft.AspNetCore.Blazor.Build.Test
                 "StandaloneApp.dll",
                 "StandaloneApp.pdb",
                 "System.dll",
+                "System.Buffers.dll",
                 "System.Collections.Concurrent.dll",
                 "System.Collections.dll",
                 "System.ComponentModel.Composition.dll",
@@ -108,7 +109,7 @@ namespace Microsoft.AspNetCore.Blazor.Build.Test
 
             // Act
 
-            var paths = RuntimeDependenciesResolver
+            var paths = ResolveBlazorRuntimeDependencies
                 .ResolveRuntimeDependenciesCore(
                     mainAssemblyLocation,
                     references,

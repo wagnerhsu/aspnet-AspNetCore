@@ -9,6 +9,7 @@
     <OutputName>$(Name)-$(Platform)</OutputName>
     <OutputType>Package</OutputType>
     <IsShipping>true</IsShipping>
+    <SkipCopyToArtifactsDirectory Condition="'$(IsTargetingPackBuilding)' == 'false'">true</SkipCopyToArtifactsDirectory>
     <ProjectGuid>0AC34F1B-8056-4FFB-A398-E6BB7D67B48D</ProjectGuid>
     <HarvestDirectoryAutoGenerateGuids>true</HarvestDirectoryAutoGenerateGuids>
     <HarvestDirectorySuppressSpecificWarnings>5150;5151</HarvestDirectorySuppressSpecificWarnings>
@@ -19,6 +20,7 @@
     <DefineConstants>$(DefineConstants);AspNetCoreTargetingPackSource=$(HarvestSource)</DefineConstants>
     <NamespaceGuid>DDBB771F-963F-47D3-8510-9ABD04DBE1D1</NamespaceGuid>
     <SchemaVersion>2.0</SchemaVersion>
+    <ToolsetInstallerNuspecFile>$(RepoRoot)\src\Installers\Windows\TargetingPack\TargetingPackPackage.nuspec</ToolsetInstallerNuspecFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -55,7 +57,7 @@
     </HarvestDirectory>
   </ItemGroup>
 
-  <!-- TODO: https://github.com/aspnet/AspNetCore/issues/6304. harvest from TargetingPackLayoutRoot directly. Unzipping is currently required because the zip has the signed versions of .dll files. -->
+  <!-- TODO: https://github.com/dotnet/aspnetcore/issues/6304. harvest from TargetingPackLayoutRoot directly. Unzipping is currently required because the zip has the signed versions of .dll files. -->
   <Target Name="ExtractIntermediateTargetingPack" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
       <TargetingPackHarvestRoot Condition="'$(TargetingPackHarvestRoot)' == ''">$(InstallersOutputPath)</TargetingPackHarvestRoot>
@@ -75,4 +77,31 @@
     <!-- Suppresses building this project completely during servicing builds. -->
     <BuildDependsOn Condition="'$(IsTargetingPackBuilding)' == 'false'" />
   </PropertyGroup>
+
+   <Target Name="CreateTargetingPackNugetPackage" AfterTargets="CopyToArtifactsDirectory;Build"
+      Condition="'$(IsTargetingPackBuilding)' != 'false'">
+    <PropertyGroup>
+      <MsiFullPath>$(InstallersOutputPath)$(PackageFileName)</MsiFullPath>
+
+      <!-- Everything built in this project _except_ the final package are shipping assets. -->
+      <_GeneratedPackageVersion>$(PackageVersion)</_GeneratedPackageVersion>
+      <_GeneratedPackageVersion
+          Condition="! $(PackageVersion.Contains('$(_PreReleaseLabel)'))">$(PackageVersion)-$(_PreReleaseLabel)$(_BuildNumberLabels)</_GeneratedPackageVersion>
+    </PropertyGroup>
+
+    <Exec Command="powershell -NoProfile -NoLogo $(GenerateNupkgPowershellScript) ^
+                      '$(ProductNameShort)' ^
+                      '$(MsiFullPath)' ^
+                      '$(CabFullPath)' ^
+                      '$(ToolsetInstallerNuspecFile)' ^
+                      '$(ArtifactsNonShippingPackagesDir)' ^
+                      '$(Platform)' ^
+                      '$(_GeneratedPackageVersion)' ^
+                      '$(RepoRoot)' ^
+                      '$(AspNetCoreMajorVersion)' ^
+                      '$(AspNetCoreMinorVersion)' ^
+                      '$(PackageIcon)' ^
+                      '$(PackageIconFullPath)' ^
+                      '$(PackageLicenseExpression)' " />
+  </Target>
 </Project>

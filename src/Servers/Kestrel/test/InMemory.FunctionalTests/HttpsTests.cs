@@ -122,7 +122,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
             LoggerFactory.AddProvider(loggerProvider);
 
             await using (var server = new TestServer(context => Task.CompletedTask,
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
                     listenOptions.UseHttps(TestResources.GetTestCertificate());
@@ -143,13 +143,14 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
         }
 
         [Fact]
+        [QuarantinedTest]
         public async Task ClientHandshakeFailureLoggedAsDebug()
         {
             var loggerProvider = new HandshakeErrorLoggerProvider();
             LoggerFactory.AddProvider(loggerProvider);
 
             await using (var server = new TestServer(context => Task.CompletedTask,
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
                     listenOptions.UseHttps(TestResources.GetTestCertificate());
@@ -193,7 +194,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
                         }
                     }
                 },
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
                     listenOptions.UseHttps(TestResources.GetTestCertificate());
@@ -237,7 +238,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
                         tcs.SetException(ex);
                     }
                 },
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
                     listenOptions.UseHttps(TestResources.GetTestCertificate());
@@ -268,7 +269,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
             LoggerFactory.AddProvider(loggerProvider);
 
             await using (var server = new TestServer(context => Task.CompletedTask,
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
                     listenOptions.UseHttps(TestResources.GetTestCertificate());
@@ -294,7 +295,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
             LoggerFactory.AddProvider(loggerProvider);
 
             await using (var server = new TestServer(context => Task.CompletedTask,
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
                     listenOptions.UseHttps(TestResources.GetTestCertificate());
@@ -313,7 +314,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
             var loggerProvider = new HandshakeErrorLoggerProvider();
             LoggerFactory.AddProvider(loggerProvider);
 
-            var testContext = new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 };
+            var testContext = new TestServiceContext(LoggerFactory);
             var heartbeatManager = new HeartbeatManager(testContext.ConnectionManager);
 
             var handshakeStartedTcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -361,17 +362,17 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
             LoggerFactory.AddProvider(loggerProvider);
 
             await using (var server = new TestServer(context => Task.CompletedTask,
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
-                    listenOptions.UseHttps(TestResources.GetTestCertificate());
+                    listenOptions.UseHttps(TestResources.GetTestCertificate("no_extensions.pfx"));
                 }))
             {
                 using (var connection = server.CreateConnection())
                 using (var sslStream = new SslStream(connection.Stream, true, (sender, certificate, chain, errors) => true))
                 {
                     // SslProtocols.Tls is TLS 1.0 which isn't supported by Kestrel by default.
-                    await Assert.ThrowsAsync<IOException>(() =>
+                    await Assert.ThrowsAnyAsync<Exception>(() =>
                         sslStream.AuthenticateAsClientAsync("127.0.0.1", clientCertificates: null,
                             enabledSslProtocols: SslProtocols.Tls,
                             checkCertificateRevocation: false));
@@ -384,6 +385,35 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
         }
 
         [Fact]
+        public async Task DevCertWithInvalidPrivateKeyProducesCustomWarning()
+        {
+            var loggerProvider = new HandshakeErrorLoggerProvider();
+            LoggerFactory.AddProvider(loggerProvider);
+
+            await using (var server = new TestServer(context => Task.CompletedTask,
+                new TestServiceContext(LoggerFactory),
+                listenOptions =>
+                {
+                    listenOptions.UseHttps(TestResources.GetTestCertificate("aspnetdevcert.pfx", "testPassword"));
+                }))
+            {
+                using (var connection = server.CreateConnection())
+                using (var sslStream = new SslStream(connection.Stream, true, (sender, certificate, chain, errors) => true))
+                {
+                    // SslProtocols.Tls is TLS 1.0 which isn't supported by Kestrel by default.
+                    await Assert.ThrowsAnyAsync<Exception>(() =>
+                        sslStream.AuthenticateAsClientAsync("127.0.0.1", clientCertificates: null,
+                            enabledSslProtocols: SslProtocols.Tls,
+                            checkCertificateRevocation: false));
+                }
+            }
+
+            await loggerProvider.FilterLogger.LogTcs.Task.DefaultTimeout();
+            Assert.Equal(3, loggerProvider.FilterLogger.LastEventId);
+            Assert.Equal(LogLevel.Error, loggerProvider.FilterLogger.LastLogLevel);
+        }
+
+        [Fact]
         public async Task OnAuthenticate_SeesOtherSettings()
         {
             var loggerProvider = new HandshakeErrorLoggerProvider();
@@ -393,7 +423,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
             var onAuthenticateCalled = false;
 
             await using (var server = new TestServer(context => Task.CompletedTask,
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
                     listenOptions.UseHttps(httpsOptions =>
@@ -429,7 +459,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests
             var onAuthenticateCalled = false;
 
             await using (var server = new TestServer(context => Task.CompletedTask,
-                new TestServiceContext(LoggerFactory) { ExpectedConnectionMiddlewareCount = 1 },
+                new TestServiceContext(LoggerFactory),
                 listenOptions =>
                 {
                     listenOptions.UseHttps(httpsOptions =>

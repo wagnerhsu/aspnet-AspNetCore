@@ -7,26 +7,29 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Net.Http;
+using System.Net.Http.HPack;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2.FlowControl;
-using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2.HPack;
 using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure.PipeWriterHelpers;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 {
     internal class Http2FrameWriter
     {
         // Literal Header Field without Indexing - Indexed Name (Index 8 - :status)
-        private static ReadOnlySpan<byte> _continueBytes => new byte[] { 0x08, 0x03, (byte)'1', (byte)'0', (byte)'0' };
+        // This uses C# compiler's ability to refer to static data directly. For more information see https://vcsjones.dev/2019/02/01/csharp-readonly-span-bytes-static
+        private static ReadOnlySpan<byte> ContinueBytes => new byte[] { 0x08, 0x03, (byte)'1', (byte)'0', (byte)'0' };
 
         private readonly object _writeLock = new object();
         private readonly Http2Frame _outgoingFrame;
-        private readonly HPackEncoder _hpackEncoder = new HPackEncoder();
-        private readonly PipeWriter _outputWriter;
+        private readonly Http2HeadersEnumerator _headersEnumerator = new Http2HeadersEnumerator();
+        private readonly ConcurrentPipeWriter _outputWriter;
         private readonly ConnectionContext _connectionContext;
         private readonly Http2Connection _http2Connection;
         private readonly OutputFlowControl _connectionOutputFlowControl;
@@ -51,9 +54,11 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             ITimeoutControl timeoutControl,
             MinDataRate minResponseDataRate,
             string connectionId,
+            MemoryPool<byte> memoryPool,
             IKestrelTrace log)
         {
-            _outputWriter = outputPipeWriter;
+            // Allow appending more data to the PipeWriter when a flush is pending.
+            _outputWriter = new ConcurrentPipeWriter(outputPipeWriter, memoryPool, _writeLock);
             _connectionContext = connectionContext;
             _http2Connection = http2Connection;
             _connectionOutputFlowControl = connectionOutputFlowControl;
@@ -89,7 +94,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
                 _completed = true;
                 _connectionOutputFlowControl.Abort();
-                _outputWriter.Complete();
+                _outputWriter.Abort();
             }
         }
 
@@ -135,9 +140,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                 }
 
                 _outgoingFrame.PrepareHeaders(Http2HeadersFrameFlags.END_HEADERS, streamId);
-                _outgoingFrame.PayloadLength = _continueBytes.Length;
+                _outgoingFrame.PayloadLength = ContinueBytes.Length;
                 WriteHeaderUnsynchronized();
-                _outputWriter.Write(_continueBytes);
+                _outputWriter.Write(ContinueBytes);
                 return TimeFlushUnsynchronizedAsync();
             }
         }
@@ -156,7 +161,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             |                           Padding (*)                       ...
             +---------------------------------------------------------------+
         */
-        public void WriteResponseHeaders(int streamId, int statusCode, Http2HeadersFrameFlags headerFrameFlags, IHeaderDictionary headers)
+        public void WriteResponseHeaders(int streamId, int statusCode, Http2HeadersFrameFlags headerFrameFlags, HttpResponseHeaders headers)
         {
             lock (_writeLock)
             {
@@ -167,9 +172,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
                 try
                 {
+                    _headersEnumerator.Initialize(headers);
                     _outgoingFrame.PrepareHeaders(headerFrameFlags, streamId);
                     var buffer = _headerEncodingBuffer.AsSpan();
-                    var done = _hpackEncoder.BeginEncode(statusCode, EnumerateHeaders(headers), buffer, out var payloadLength);
+                    var done = HPackHeaderWriter.BeginEncodeHeaders(statusCode, _headersEnumerator, buffer, out var payloadLength);
                     FinishWritingHeaders(streamId, payloadLength, done);
                 }
                 catch (HPackEncodingException hex)
@@ -192,9 +198,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
                 try
                 {
+                    _headersEnumerator.Initialize(headers);
                     _outgoingFrame.PrepareHeaders(Http2HeadersFrameFlags.END_STREAM, streamId);
                     var buffer = _headerEncodingBuffer.AsSpan();
-                    var done = _hpackEncoder.BeginEncode(EnumerateHeaders(headers), buffer, out var payloadLength);
+                    var done = HPackHeaderWriter.BeginEncodeHeaders(_headersEnumerator, buffer, out var payloadLength);
                     FinishWritingHeaders(streamId, payloadLength, done);
                 }
                 catch (HPackEncodingException hex)
@@ -223,7 +230,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             {
                 _outgoingFrame.PrepareContinuation(Http2ContinuationFrameFlags.NONE, streamId);
 
-                done = _hpackEncoder.Encode(buffer, out payloadLength);
+                done = HPackHeaderWriter.ContinueEncodeHeaders(_headersEnumerator, buffer, out payloadLength);
                 _outgoingFrame.PayloadLength = payloadLength;
 
                 if (done)
@@ -236,7 +243,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             }
         }
 
-        public ValueTask<FlushResult> WriteDataAsync(int streamId, StreamOutputFlowControl flowControl, ReadOnlySequence<byte> data, bool endStream)
+        public ValueTask<FlushResult> WriteDataAsync(int streamId, StreamOutputFlowControl flowControl, in ReadOnlySequence<byte> data, bool endStream, bool forceFlush)
         {
             // The Length property of a ReadOnlySequence can be expensive, so we cache the value.
             var dataLength = data.Length;
@@ -258,7 +265,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                 // This cast is safe since if dataLength would overflow an int, it's guaranteed to be greater than the available flow control window.
                 flowControl.Advance((int)dataLength);
                 WriteDataUnsynchronized(streamId, data, dataLength, endStream);
-                return TimeFlushUnsynchronizedAsync();
+
+                if (forceFlush)
+                {
+                    return TimeFlushUnsynchronizedAsync();
+                }
+
+                return default;
             }
         }
 
@@ -271,28 +284,17 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             |                           Padding (*)                       ...
             +---------------------------------------------------------------+
         */
-        private void WriteDataUnsynchronized(int streamId, ReadOnlySequence<byte> data, long dataLength, bool endStream)
+        private void WriteDataUnsynchronized(int streamId, in ReadOnlySequence<byte> data, long dataLength, bool endStream)
         {
+            Debug.Assert(dataLength == data.Length);
+
             // Note padding is not implemented
             _outgoingFrame.PrepareData(streamId);
 
-            var dataPayloadLength = (int)_maxFrameSize; // Minus padding
-
-            while (data.Length > dataPayloadLength)
+            if (dataLength > _maxFrameSize) // Minus padding
             {
-                var currentData = data.Slice(0, dataPayloadLength);
-                _outgoingFrame.PayloadLength = dataPayloadLength; // Plus padding
-
-                WriteHeaderUnsynchronized();
-
-                foreach (var buffer in currentData)
-                {
-                    _outputWriter.Write(buffer.Span);
-                }
-
-                // Plus padding
-
-                data = data.Slice(dataPayloadLength);
+                TrimAndWriteDataUnsynchronized(in data, dataLength, endStream);
+                return;
             }
 
             if (endStream)
@@ -300,7 +302,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                 _outgoingFrame.DataFlags |= Http2DataFrameFlags.END_STREAM;
             }
 
-            _outgoingFrame.PayloadLength = (int)data.Length; // Plus padding
+            _outgoingFrame.PayloadLength = (int)dataLength; // Plus padding
 
             WriteHeaderUnsynchronized();
 
@@ -310,6 +312,51 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             }
 
             // Plus padding
+            return;
+
+            void TrimAndWriteDataUnsynchronized(in ReadOnlySequence<byte> data, long dataLength, bool endStream)
+            {
+                Debug.Assert(dataLength == data.Length);
+
+                var dataPayloadLength = (int)_maxFrameSize; // Minus padding
+
+                Debug.Assert(dataLength > dataPayloadLength);
+
+                var remainingData = data;
+                do
+                {
+                    var currentData = remainingData.Slice(0, dataPayloadLength);
+                    _outgoingFrame.PayloadLength = dataPayloadLength; // Plus padding
+
+                    WriteHeaderUnsynchronized();
+
+                    foreach (var buffer in currentData)
+                    {
+                        _outputWriter.Write(buffer.Span);
+                    }
+
+                    // Plus padding
+                    dataLength -= dataPayloadLength;
+                    remainingData = remainingData.Slice(dataPayloadLength);
+
+                } while (dataLength > dataPayloadLength);
+
+                if (endStream)
+                {
+                    _outgoingFrame.DataFlags |= Http2DataFrameFlags.END_STREAM;
+                }
+
+                _outgoingFrame.PayloadLength = (int)dataLength; // Plus padding
+
+                WriteHeaderUnsynchronized();
+
+                foreach (var buffer in remainingData)
+                {
+                    _outputWriter.Write(buffer.Span);
+                }
+
+                // Plus padding
+            }
         }
 
         private async ValueTask<FlushResult> WriteDataAsync(int streamId, StreamOutputFlowControl flowControl, ReadOnlySequence<byte> data, long dataLength, bool endStream)
@@ -318,7 +365,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
             while (dataLength > 0)
             {
-                OutputFlowControlAwaitable availabilityAwaitable;
+                ValueTask<object> availabilityTask;
                 var writeTask = default(ValueTask<FlushResult>);
 
                 lock (_writeLock)
@@ -328,7 +375,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                         break;
                     }
 
-                    var actual = flowControl.AdvanceUpToAndWait(dataLength, out availabilityAwaitable);
+                    var actual = flowControl.AdvanceUpToAndWait(dataLength, out availabilityTask);
 
                     if (actual > 0)
                     {
@@ -358,7 +405,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                 }
 
                 // Avoid timing writes that are already complete. This is likely to happen during the last iteration.
-                if (availabilityAwaitable == null && writeTask.IsCompleted)
+                if (availabilityTask.IsCompleted && writeTask.IsCompleted)
                 {
                     continue;
                 }
@@ -370,9 +417,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
                 // This awaitable releases continuations in FIFO order when the window updates.
                 // It should be very rare for a continuation to run without any availability.
-                if (availabilityAwaitable != null)
+                if (!availabilityTask.IsCompleted)
                 {
-                    await availabilityAwaitable;
+                    await availabilityTask;
                 }
 
                 flushResult = await writeTask;
@@ -499,7 +546,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             |                                                               |
             +---------------------------------------------------------------+
         */
-        public ValueTask<FlushResult> WritePingAsync(Http2PingFrameFlags flags, ReadOnlySequence<byte> payload)
+        public ValueTask<FlushResult> WritePingAsync(Http2PingFrameFlags flags, in ReadOnlySequence<byte> payload)
         {
             lock (_writeLock)
             {
@@ -508,7 +555,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                     return default;
                 }
 
-                _outgoingFrame.PreparePing(Http2PingFrameFlags.ACK);
+                _outgoingFrame.PreparePing(flags);
                 Debug.Assert(payload.Length == _outgoingFrame.PayloadLength); // 8
                 WriteHeaderUnsynchronized();
                 foreach (var segment in payload)
@@ -616,17 +663,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             lock (_writeLock)
             {
                 flowControl.Abort();
-            }
-        }
-
-        private static IEnumerable<KeyValuePair<string, string>> EnumerateHeaders(IHeaderDictionary headers)
-        {
-            foreach (var header in headers)
-            {
-                foreach (var value in header.Value)
-                {
-                    yield return new KeyValuePair<string, string>(header.Key, value);
-                }
             }
         }
     }

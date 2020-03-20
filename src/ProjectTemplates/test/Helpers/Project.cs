@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.CommandLineUtils;
@@ -21,7 +22,18 @@ namespace Templates.Test.Helpers
     {
         private const string _urls = "http://127.0.0.1:0;https://127.0.0.1:0";
 
-        public const string DefaultFramework = "netcoreapp3.0";
+        public static bool IsCIEnvironment => typeof(Project).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+            .Any(a => a.Key == "ContinuousIntegrationBuild");
+
+        public static string ArtifactsLogDir => (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HELIX_DIR"))) 
+            ? GetAssemblyMetadata("ArtifactsLogDir")
+            : Path.Combine(Environment.GetEnvironmentVariable("HELIX_DIR"), "logs");
+        
+        public static string DotNetEfFullPath => (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DotNetEfFullPath"))) 
+            ? typeof(ProjectFactoryFixture).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+                .First(attribute => attribute.Key == "DotNetEfFullPath")
+                .Value
+            : Environment.GetEnvironmentVariable("DotNetEfFullPath");
 
         public SemaphoreSlim DotNetNewLock { get; set; }
         public SemaphoreSlim NodeLock { get; set; }
@@ -29,48 +41,66 @@ namespace Templates.Test.Helpers
         public string ProjectArguments { get; set; }
         public string ProjectGuid { get; set; }
         public string TemplateOutputDir { get; set; }
-        public string TemplateBuildDir => Path.Combine(TemplateOutputDir, "bin", "Debug", DefaultFramework);
-        public string TemplatePublishDir => Path.Combine(TemplateOutputDir, "bin", "Release", DefaultFramework, "publish");
+        public string TargetFramework { get; set; } = GetAssemblyMetadata("Test.DefaultTargetFramework");
+
+        public string TemplateBuildDir => Path.Combine(TemplateOutputDir, "bin", "Debug", TargetFramework);
+        public string TemplatePublishDir => Path.Combine(TemplateOutputDir, "bin", "Release", TargetFramework, "publish");
 
         private string TemplateServerDir => Path.Combine(TemplateOutputDir, $"{ProjectName}.Server");
         private string TemplateClientDir => Path.Combine(TemplateOutputDir, $"{ProjectName}.Client");
-        public string TemplateClientDebugDir => Path.Combine(TemplateClientDir, "bin", "Debug", DefaultFramework);
-        public string TemplateClientReleaseDir => Path.Combine(TemplateClientDir, "bin", "Release", DefaultFramework, "publish");
-        public string TemplateServerReleaseDir => Path.Combine(TemplateServerDir, "bin", "Release", DefaultFramework, "publish");
+        public string TemplateClientDebugDir => Path.Combine(TemplateClientDir, "bin", "Debug", TargetFramework);
+        public string TemplateClientReleaseDir => Path.Combine(TemplateClientDir, "bin", "Release", TargetFramework, "publish");
+        public string TemplateServerReleaseDir => Path.Combine(TemplateServerDir, "bin", "Release", TargetFramework, "publish");
 
         public ITestOutputHelper Output { get; set; }
         public IMessageSink DiagnosticsMessageSink { get; set; }
 
-        internal async Task<ProcessEx> RunDotNetNewAsync(string templateName, string auth = null, string language = null, bool useLocalDB = false, bool noHttps = false)
+        internal async Task<ProcessEx> RunDotNetNewAsync(
+            string templateName,
+            string auth = null,
+            string language = null,
+            bool useLocalDB = false,
+            bool noHttps = false,
+            string[] args = null,
+            // Used to set special options in MSBuild
+            IDictionary<string, string> environmentVariables = null)
         {
             var hiveArg = $"--debug:custom-hive \"{TemplatePackageInstaller.CustomHivePath}\"";
-            var args = $"new {templateName} {hiveArg}";
-
+            var argString = $"new {templateName} {hiveArg}";
+            environmentVariables ??= new Dictionary<string, string>();
             if (!string.IsNullOrEmpty(auth))
             {
-                args += $" --auth {auth}";
+                argString += $" --auth {auth}";
             }
 
             if (!string.IsNullOrEmpty(language))
             {
-                args += $" -lang {language}";
+                argString += $" -lang {language}";
             }
 
             if (useLocalDB)
             {
-                args += $" --use-local-db";
+                argString += $" --use-local-db";
             }
 
             if (noHttps)
             {
-                args += $" --no-https";
+                argString += $" --no-https";
+            }
+
+            if (args != null)
+            {
+                foreach (var arg in args)
+                {
+                    argString += " " + arg;
+                }
             }
 
             // Save a copy of the arguments used for better diagnostic error messages later.
             // We omit the hive argument and the template output dir as they are not relevant and add noise.
-            ProjectArguments = args.Replace(hiveArg, "");
+            ProjectArguments = argString.Replace(hiveArg, "");
 
-            args += $" -o {TemplateOutputDir}";
+            argString += $" -o {TemplateOutputDir}";
 
             // Only run one instance of 'dotnet new' at once, as a workaround for
             // https://github.com/aspnet/templating/issues/63
@@ -78,7 +108,7 @@ namespace Templates.Test.Helpers
             await DotNetNewLock.WaitAsync();
             try
             {
-                var execution = ProcessEx.Run(Output, AppContext.BaseDirectory, DotNetMuxer.MuxerPathOrDefault(), args);
+                var execution = ProcessEx.Run(Output, AppContext.BaseDirectory, DotNetMuxer.MuxerPathOrDefault(), argString, environmentVariables);
                 await execution.Exited;
                 return execution;
             }
@@ -88,14 +118,9 @@ namespace Templates.Test.Helpers
             }
         }
 
-        internal async Task<ProcessEx> RunDotNetPublishAsync(bool takeNodeLock = false)
+        internal async Task<ProcessEx> RunDotNetPublishAsync(bool takeNodeLock = false, IDictionary<string, string> packageOptions = null, string additionalArgs = null)
         {
             Output.WriteLine("Publishing ASP.NET application...");
-
-            // Workaround for issue with runtime store not yet being published
-            // https://github.com/aspnet/Home/issues/2254#issuecomment-339709628
-            var extraArgs = "-p:PublishWithAspNetCoreTargetManifest=false";
-
 
             // This is going to trigger a build, so we need to acquire the lock like in the other cases.
             // We want to take the node lock as some builds run NPM as part of the build and we want to make sure
@@ -104,8 +129,9 @@ namespace Templates.Test.Helpers
             await effectiveLock.WaitAsync();
             try
             {
-                var result = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), $"publish -c Release {extraArgs}");
+                var result = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), $"publish -c Release /bl {additionalArgs}", packageOptions);
                 await result.Exited;
+                CaptureBinLogOnFailure(result);
                 return result;
             }
             finally
@@ -114,7 +140,7 @@ namespace Templates.Test.Helpers
             }
         }
 
-        internal async Task<ProcessEx> RunDotNetBuildAsync(bool takeNodeLock = false)
+        internal async Task<ProcessEx> RunDotNetBuildAsync(bool takeNodeLock = false, IDictionary<string, string> packageOptions = null, string additionalArgs = null)
         {
             Output.WriteLine("Building ASP.NET application...");
 
@@ -125,8 +151,9 @@ namespace Templates.Test.Helpers
             await effectiveLock.WaitAsync();
             try
             {
-                var result = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), "build -c Debug");
+                var result = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), $"build -c Debug /bl {additionalArgs}", packageOptions);
                 await result.Exited;
+                CaptureBinLogOnFailure(result);
                 return result;
             }
             finally
@@ -179,27 +206,35 @@ namespace Templates.Test.Helpers
             return new AspNetProcess(Output, TemplateClientReleaseDir, projectDll, environment);
         }
 
-        internal AspNetProcess StartBuiltProjectAsync()
+        internal AspNetProcess StartBuiltProjectAsync(bool hasListeningUri = true)
         {
             var environment = new Dictionary<string, string>
             {
                 ["ASPNETCORE_URLS"] = _urls,
-                ["ASPNETCORE_ENVIRONMENT"] = "Development"
+                ["ASPNETCORE_ENVIRONMENT"] = "Development",
+                ["ASPNETCORE_Logging__Console__LogLevel__Default"] = "Debug",
+                ["ASPNETCORE_Logging__Console__LogLevel__System"] = "Debug",
+                ["ASPNETCORE_Logging__Console__LogLevel__Microsoft"] = "Debug",
+                ["ASPNETCORE_Logging__Console__IncludeScopes"] = "true",
             };
 
             var projectDll = Path.Combine(TemplateBuildDir, $"{ProjectName}.dll");
-            return new AspNetProcess(Output, TemplateOutputDir, projectDll, environment);
+            return new AspNetProcess(Output, TemplateOutputDir, projectDll, environment, hasListeningUri: hasListeningUri);
         }
 
-        internal AspNetProcess StartPublishedProjectAsync()
+        internal AspNetProcess StartPublishedProjectAsync(bool hasListeningUri = true)
         {
             var environment = new Dictionary<string, string>
             {
                 ["ASPNETCORE_URLS"] = _urls,
+                ["ASPNETCORE_Logging__Console__LogLevel__Default"] = "Debug",
+                ["ASPNETCORE_Logging__Console__LogLevel__System"] = "Debug",
+                ["ASPNETCORE_Logging__Console__LogLevel__Microsoft"] = "Debug",
+                ["ASPNETCORE_Logging__Console__IncludeScopes"] = "true",
             };
 
             var projectDll = $"{ProjectName}.dll";
-            return new AspNetProcess(Output, TemplatePublishDir, projectDll, environment);
+            return new AspNetProcess(Output, TemplatePublishDir, projectDll, environment, hasListeningUri: hasListeningUri);
         }
 
         internal async Task<ProcessEx> RestoreWithRetryAsync(ITestOutputHelper output, string workingDirectory)
@@ -215,7 +250,7 @@ namespace Templates.Test.Helpers
             do
             {
                 restoreResult = await RestoreAsync(output, workingDirectory);
-                if (restoreResult.ExitCode == 0)
+                if (restoreResult.HasExited && restoreResult.ExitCode == 0)
                 {
                     return restoreResult;
                 }
@@ -260,7 +295,7 @@ namespace Templates.Test.Helpers
             try
             {
                 output.WriteLine($"Restoring NPM packages in '{workingDirectory}' using npm...");
-                var result = await ProcessEx.RunViaShellAsync(output, workingDirectory, "npm install");
+                var result = ProcessEx.RunViaShell(output, workingDirectory, "npm install");
                 return result;
             }
             finally
@@ -271,20 +306,24 @@ namespace Templates.Test.Helpers
 
         internal async Task<ProcessEx> RunDotNetEfCreateMigrationAsync(string migrationName)
         {
-            var assembly = typeof(ProjectFactoryFixture).Assembly;
-
-            var dotNetEfFullPath = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
-                .First(attribute => attribute.Key == "DotNetEfFullPath")
-                .Value;
-
-            var args = $"\"{dotNetEfFullPath}\" --verbose --no-build migrations add {migrationName}";
-
+            var args = $"--verbose --no-build migrations add {migrationName}";
+            
             // Only run one instance of 'dotnet new' at once, as a workaround for
             // https://github.com/aspnet/templating/issues/63
             await DotNetNewLock.WaitAsync();
             try
             {
-                var result = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), args);
+                var command = DotNetMuxer.MuxerPathOrDefault();
+                if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DotNetEfFullPath")))
+                {
+                    args = $"\"{DotNetEfFullPath}\" " + args;
+                }
+                else
+                {
+                    command = "dotnet-ef";
+                }
+                
+                var result = ProcessEx.Run(Output, TemplateOutputDir, command, args);
                 await result.Exited;
                 return result;
             }
@@ -296,20 +335,24 @@ namespace Templates.Test.Helpers
 
         internal async Task<ProcessEx> RunDotNetEfUpdateDatabaseAsync()
         {
-            var assembly = typeof(ProjectFactoryFixture).Assembly;
-
-            var dotNetEfFullPath = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
-                .First(attribute => attribute.Key == "DotNetEfFullPath")
-                .Value;
-
-            var args = $"\"{dotNetEfFullPath}\" --verbose --no-build database update";
+            var args = "--verbose --no-build database update";
 
             // Only run one instance of 'dotnet new' at once, as a workaround for
             // https://github.com/aspnet/templating/issues/63
             await DotNetNewLock.WaitAsync();
             try
             {
-                var result = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), args);
+                var command = DotNetMuxer.MuxerPathOrDefault();
+                if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DotNetEfFullPath")))
+                {
+                    args = $"\"{DotNetEfFullPath}\" " + args;
+                }
+                else
+                {
+                    command = "dotnet-ef";
+                }
+                
+                var result = ProcessEx.Run(Output, TemplateOutputDir, command, args);
                 await result.Exited;
                 return result;
             }
@@ -485,6 +528,30 @@ namespace Templates.Test.Helpers
             }
         }
 
+        private void CaptureBinLogOnFailure(ProcessEx result)
+        {
+            if (result.ExitCode != 0 && !string.IsNullOrEmpty(ArtifactsLogDir))
+            {
+                var sourceFile = Path.Combine(TemplateOutputDir, "msbuild.binlog");
+                Assert.True(File.Exists(sourceFile), $"Log for '{ProjectName}' not found in '{sourceFile}'.");
+                var destination = Path.Combine(ArtifactsLogDir, ProjectName + ".binlog");
+                File.Move(sourceFile, destination);
+            }
+        }
+
         public override string ToString() => $"{ProjectName}: {TemplateOutputDir}";
+
+        private static string GetAssemblyMetadata(string key)
+        {
+            var attribute = typeof(Project).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+                .FirstOrDefault(a => a.Key == key);
+
+            if (attribute is null)
+            {
+                throw new ArgumentException($"AssemblyMetadataAttribute with key {key} was not found.");
+            }
+
+            return attribute.Value;
+        }
     }
 }

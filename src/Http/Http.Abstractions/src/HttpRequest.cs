@@ -45,9 +45,9 @@ namespace Microsoft.AspNetCore.Http
         public abstract HostString Host { get; set; }
 
         /// <summary>
-        /// Gets or sets the RequestPathBase.
+        /// Gets or sets the base path for the request. The path base should not end with a trailing slash.
         /// </summary>
-        /// <returns>The RequestPathBase.</returns>
+        /// <returns>The base path for the request.</returns>
         public abstract PathString PathBase { get; set; }
 
         /// <summary>
@@ -99,14 +99,15 @@ namespace Microsoft.AspNetCore.Http
         public abstract string ContentType { get; set; }
 
         /// <summary>
-        /// Gets or sets the RequestBody Stream.
+        /// Gets or sets the request body <see cref="Stream"/>.
         /// </summary>
-        /// <returns>The RequestBody Stream.</returns>
+        /// <value>The request body <see cref="Stream"/>.</value>
         public abstract Stream Body { get; set; }
 
         /// <summary>
-        /// Gets the request body pipe <see cref="PipeReader"/>.
+        /// Gets the request body <see cref="PipeReader"/>.
         /// </summary>
+        /// <value>The request body <see cref="PipeReader"/>.</value>
         public virtual PipeReader BodyReader { get => throw new NotImplementedException();  }
 
         /// <summary>

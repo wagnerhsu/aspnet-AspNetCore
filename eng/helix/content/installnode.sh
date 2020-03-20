@@ -9,18 +9,30 @@ if type -P "node" &>/dev/null; then
 fi
 
 node_version=$1
+arch=$2
 osname=`uname -s`
-echo $osname
 if [ "$osname" = "Darwin" ]; then
-   platformarch='darwin-x64'
+   platformarch="darwin-$arch"
 else
-   platformarch='linux-x64'
+   platformarch="linux-$arch"
 fi
+echo "PlatformArch: $platformarch"
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 output_dir="$DIR/node"
 url="http://nodejs.org/dist/v$node_version/node-v$node_version-$platformarch.tar.gz"
+echo "Downloading from: $url"
 tmp="$(mktemp -d -t install-node.XXXXXX)"
-trap "rm -rf $tmp" EXIT
+
+cleanup() {
+    exitcode=$?
+    if [ $exitcode -ne 0 ]; then
+      echo "Failed to install node with exit code: $exitcode"
+    fi
+    rm -rf "$tmp"
+    exit $exitcode
+}
+
+trap "cleanup" EXIT
 cd "$tmp"
 curl -Lsfo $(basename $url) "$url"
 echo "Installing node from $(basename $url) $url"

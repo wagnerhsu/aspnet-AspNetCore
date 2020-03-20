@@ -3,9 +3,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO.Pipelines;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Internal;
 using Microsoft.AspNetCore.SignalR.Protocol;
 using Microsoft.AspNetCore.SignalR.Tests;
@@ -75,7 +78,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var testConnectionFactory = default(ReconnectingConnectionFactory);
                     var startCallCount = 0;
                     var originalConnectionId = "originalConnectionId";
@@ -189,7 +192,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var startCallCount = 0;
 
                     Task OnTestConnectionStart()
@@ -281,7 +284,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var testConnectionFactory = new ReconnectingConnectionFactory();
                     builder.Services.AddSingleton<IConnectionFactory>(testConnectionFactory);
 
@@ -366,6 +369,156 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
             }
 
             [Fact]
+            public async Task CanBeInducedByCloseMessageWithAllowReconnectSet()
+            {
+                bool ExpectedErrors(WriteContext writeContext)
+                {
+                    return writeContext.LoggerName == typeof(HubConnection).FullName &&
+                           (writeContext.EventId.Name == "ReceivedCloseWithError" ||
+                            writeContext.EventId.Name == "ReconnectingWithError");
+                }
+
+                var failReconnectTcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                using (StartVerifiableLog(ExpectedErrors))
+                {
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
+                    var testConnectionFactory = default(ReconnectingConnectionFactory);
+       
+                    testConnectionFactory = new ReconnectingConnectionFactory(() => new TestConnection());
+                    builder.Services.AddSingleton<IConnectionFactory>(testConnectionFactory);
+
+                    var retryContexts = new List<RetryContext>();
+                    var mockReconnectPolicy = new Mock<IRetryPolicy>();
+                    mockReconnectPolicy.Setup(p => p.NextRetryDelay(It.IsAny<RetryContext>())).Returns<RetryContext>(context =>
+                    {
+                        retryContexts.Add(context);
+                        return TimeSpan.Zero;
+                    });
+                    builder.WithAutomaticReconnect(mockReconnectPolicy.Object);
+
+                    await using var hubConnection = builder.Build();
+                    var reconnectingCount = 0;
+                    var reconnectedCount = 0;
+                    var reconnectingErrorTcs = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var reconnectedConnectionIdTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var closedErrorTcs = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                    hubConnection.Reconnecting += error =>
+                    {
+                        reconnectingCount++;
+                        reconnectingErrorTcs.SetResult(error);
+                        return Task.CompletedTask;
+                    };
+
+                    hubConnection.Reconnected += connectionId =>
+                    {
+                        reconnectedCount++;
+                        reconnectedConnectionIdTcs.SetResult(connectionId);
+                        return Task.CompletedTask;
+                    };
+
+                    hubConnection.Closed += error =>
+                    {
+                        closedErrorTcs.SetResult(error);
+                        return Task.CompletedTask;
+                    };
+
+                    await hubConnection.StartAsync().OrTimeout();
+
+                    var currentConnection = await testConnectionFactory.GetNextOrCurrentTestConnection();
+                    await currentConnection.ReceiveJsonMessage(new
+                    {
+                        type = HubProtocolConstants.CloseMessageType,
+                        error = "Error!",
+                        allowReconnect = true,
+                    });
+
+                    var reconnectingException = await reconnectingErrorTcs.Task.OrTimeout();
+                    var expectedMessage = "The server closed the connection with the following error: Error!";
+
+                    Assert.Equal(expectedMessage, reconnectingException.Message);
+                    Assert.Single(retryContexts);
+                    Assert.Equal(expectedMessage, retryContexts[0].RetryReason.Message);
+                    Assert.Equal(0, retryContexts[0].PreviousRetryCount);
+                    Assert.Equal(TimeSpan.Zero, retryContexts[0].ElapsedTime);
+
+                    await reconnectedConnectionIdTcs.Task.OrTimeout();
+
+                    await hubConnection.StopAsync().OrTimeout();
+
+                    var closeError = await closedErrorTcs.Task.OrTimeout();
+                    Assert.Null(closeError);
+                    Assert.Equal(1, reconnectingCount);
+                    Assert.Equal(1, reconnectedCount);
+                }
+            }
+
+            [Fact]
+            public async Task CannotBeInducedByCloseMessageWithAllowReconnectOmitted()
+            {
+                bool ExpectedErrors(WriteContext writeContext)
+                {
+                    return writeContext.LoggerName == typeof(HubConnection).FullName &&
+                           (writeContext.EventId.Name == "ReceivedCloseWithError" ||
+                            writeContext.EventId.Name == "ShutdownWithError");
+                }
+
+                var failReconnectTcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                using (StartVerifiableLog(ExpectedErrors))
+                {
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
+                    var testConnectionFactory = default(ReconnectingConnectionFactory);
+       
+                    testConnectionFactory = new ReconnectingConnectionFactory(() => new TestConnection());
+                    builder.Services.AddSingleton<IConnectionFactory>(testConnectionFactory);
+
+                    var reconnectingCount = 0;
+                    var nextRetryDelayCallCount = 0;
+                    var closedErrorTcs = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                    var mockReconnectPolicy = new Mock<IRetryPolicy>();
+                    mockReconnectPolicy.Setup(p => p.NextRetryDelay(It.IsAny<RetryContext>())).Returns<RetryContext>(context =>
+                    {
+                        nextRetryDelayCallCount++;
+                        return TimeSpan.Zero;
+                    });
+
+                    builder.WithAutomaticReconnect(mockReconnectPolicy.Object);
+
+                    await using var hubConnection = builder.Build();
+
+                    hubConnection.Reconnecting += error =>
+                    {
+                        reconnectingCount++;
+                        return Task.CompletedTask;
+                    };
+
+                    hubConnection.Closed += error =>
+                    {
+                        closedErrorTcs.SetResult(error);
+                        return Task.CompletedTask;
+                    };
+
+                    await hubConnection.StartAsync().OrTimeout();
+
+                    var currentConnection = await testConnectionFactory.GetNextOrCurrentTestConnection();
+                    await currentConnection.ReceiveJsonMessage(new
+                    {
+                        type = HubProtocolConstants.CloseMessageType,
+                        error = "Error!",
+                    });
+
+                    var closeError = await closedErrorTcs.Task.OrTimeout();
+
+                    Assert.Equal("The server closed the connection with the following error: Error!", closeError.Message);
+                    Assert.Equal(0, nextRetryDelayCallCount);
+                    Assert.Equal(0, reconnectingCount);
+                }
+            }
+
+            [Fact]
             public async Task EventsNotFiredIfFirstRetryDelayIsNull()
             {
                 bool ExpectedErrors(WriteContext writeContext)
@@ -376,7 +529,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var testConnectionFactory = new ReconnectingConnectionFactory();
                     builder.Services.AddSingleton<IConnectionFactory>(testConnectionFactory);
 
@@ -431,7 +584,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var testConnectionFactory = new ReconnectingConnectionFactory(() => new TestConnection(autoHandshake: false));
                     builder.Services.AddSingleton<IConnectionFactory>(testConnectionFactory);
 
@@ -489,7 +642,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var testConnectionFactory = new ReconnectingConnectionFactory(() => new TestConnection(autoHandshake: false));
                     builder.Services.AddSingleton<IConnectionFactory>(testConnectionFactory);
 
@@ -596,7 +749,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var testConnectionFactory = new ReconnectingConnectionFactory(() => new TestConnection(autoHandshake: false));
                     builder.Services.AddSingleton<IConnectionFactory>(testConnectionFactory);
 
@@ -715,7 +868,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var connectionStartTcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
 
                     async Task OnTestConnectionStart()
@@ -806,7 +959,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                 using (StartVerifiableLog(ExpectedErrors))
                 {
-                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory);
+                    var builder = new HubConnectionBuilder().WithLoggerFactory(LoggerFactory).WithUrl("http://example.com");
                     var testConnectionFactory = new ReconnectingConnectionFactory();
                     builder.Services.AddSingleton<IConnectionFactory>(testConnectionFactory);
 
@@ -886,7 +1039,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
                     return _testConnectionTcs.Task;
                 }
 
-                public async Task<ConnectionContext> ConnectAsync(TransferFormat transferFormat, CancellationToken cancellationToken = default)
+                public async ValueTask<ConnectionContext> ConnectAsync(EndPoint endPoint, CancellationToken cancellationToken = default)
                 {
                     var testConnection = _testConnectionFactory();
 
@@ -894,7 +1047,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                     try
                     {
-                        return await testConnection.StartAsync(transferFormat);
+                        return new DisposeInterceptingConnectionContextDecorator(await testConnection.StartAsync(), this);
                     }
                     catch
                     {
@@ -911,6 +1064,31 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests
 
                     await disposingTestConnection.DisposeAsync();
                 }
+            }
+
+            private class DisposeInterceptingConnectionContextDecorator : ConnectionContext
+            {
+                private readonly ConnectionContext _inner;
+                private readonly ReconnectingConnectionFactory _reconnectingConnectionFactory;
+
+                public DisposeInterceptingConnectionContextDecorator(ConnectionContext inner, ReconnectingConnectionFactory reconnectingConnectionFactory)
+                {
+                    _inner = inner;
+                    _reconnectingConnectionFactory = reconnectingConnectionFactory;
+                }
+
+                public override string ConnectionId { get => _inner.ConnectionId; set => _inner.ConnectionId = value; }
+                public override IFeatureCollection Features => _inner.Features;
+                public override IDictionary<object, object> Items { get => _inner.Items; set => _inner.Items = value; }
+                public override IDuplexPipe Transport { get => _inner.Transport; set => _inner.Transport = value; }
+                public override CancellationToken ConnectionClosed { get => _inner.ConnectionClosed; set => _inner.ConnectionClosed = value; }
+                public override EndPoint LocalEndPoint { get => _inner.LocalEndPoint; set => _inner.LocalEndPoint = value; }
+                public override EndPoint RemoteEndPoint { get => _inner.RemoteEndPoint; set => _inner.RemoteEndPoint = value; }
+
+                public override void Abort(ConnectionAbortedException abortReason) => _inner.Abort(abortReason);
+                public override void Abort() => _inner.Abort();
+
+                public override ValueTask DisposeAsync() => new ValueTask(_reconnectingConnectionFactory.DisposeAsync(_inner));
             }
         }
     }

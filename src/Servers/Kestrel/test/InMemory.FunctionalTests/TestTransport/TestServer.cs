@@ -3,11 +3,13 @@
 
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Http;
@@ -80,13 +82,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.InMemory.FunctionalTests.TestTrans
                     {
                         context.ServerOptions.ApplicationServices = sp;
                         configureKestrel(context.ServerOptions);
-
-                        // Prevent ListenOptions reuse. This is easily done accidentally when trying to debug a test by running it
-                        // in a loop, but will cause problems because only the app func from the first loop will ever be invoked.
-                        Assert.All(context.ServerOptions.ListenOptions, lo =>
-                            Assert.Equal(context.ExpectedConnectionMiddlewareCount, lo._middleware.Count));
-
-                        return new KestrelServer(_transportFactory, context);
+                        return new KestrelServer(new List<IConnectionListenerFactory>() { _transportFactory }, context);
                     });
                 });
 

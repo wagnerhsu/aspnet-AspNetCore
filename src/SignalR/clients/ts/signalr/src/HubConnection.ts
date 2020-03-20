@@ -450,11 +450,11 @@ export class HubConnection {
 
     /** Removes the specified handler for the specified hub method.
      *
-     * You must pass the exact same Function instance as was previously passed to {@link @aspnet/signalr.HubConnection.on}. Passing a different instance (even if the function
+     * You must pass the exact same Function instance as was previously passed to {@link @microsoft/signalr.HubConnection.on}. Passing a different instance (even if the function
      * body is the same) will not remove the handler.
      *
      * @param {string} methodName The name of the method to remove handlers for.
-     * @param {Function} method The handler to remove. This must be the same Function instance as the one passed to {@link @aspnet/signalr.HubConnection.on}.
+     * @param {Function} method The handler to remove. This must be the same Function instance as the one passed to {@link @microsoft/signalr.HubConnection.on}.
      */
     public off(methodName: string, method: (...args: any[]) => void): void;
     public off(methodName: string, method?: (...args: any[]) => void): void {
@@ -545,8 +545,18 @@ export class HubConnection {
                     case MessageType.Close:
                         this.logger.log(LogLevel.Information, "Close message received from server.");
 
-                        // We don't want to wait on the stop itself.
-                        this.stopPromise = this.stopInternal(message.error ? new Error("Server returned an error on close: " + message.error) : undefined);
+                        const error = message.error ? new Error("Server returned an error on close: " + message.error) : undefined;
+
+                        if (message.allowReconnect === true) {
+                            // It feels wrong not to await connection.stop() here, but processIncomingData is called as part of an onreceive callback which is not async,
+                            // this is already the behavior for serverTimeout(), and HttpConnection.Stop() should catch and log all possible exceptions.
+
+                            // tslint:disable-next-line:no-floating-promises
+                            this.connection.stop(error);
+                        } else {
+                            // We cannot await stopInternal() here, but subsequent calls to stop() will await this if stopInternal() is still ongoing.
+                            this.stopPromise = this.stopInternal(error);
+                        }
 
                         break;
                     default:
@@ -589,6 +599,10 @@ export class HubConnection {
     }
 
     private resetKeepAliveInterval() {
+        if (this.connection.features.inherentKeepAlive) {
+            return;
+        }
+
         this.cleanupPingTimer();
         this.pingServerHandle = setTimeout(async () => {
             if (this.connectionState === HubConnectionState.Connected) {
@@ -804,23 +818,40 @@ export class HubConnection {
 
     private createInvocation(methodName: string, args: any[], nonblocking: boolean, streamIds: string[]): InvocationMessage {
         if (nonblocking) {
-            return {
-                arguments: args,
-                streamIds,
-                target: methodName,
-                type: MessageType.Invocation,
-            };
+            if (streamIds.length !== 0) {
+                return {
+                    arguments: args,
+                    streamIds,
+                    target: methodName,
+                    type: MessageType.Invocation,
+                };
+            } else {
+                return {
+                    arguments: args,
+                    target: methodName,
+                    type: MessageType.Invocation,
+                };
+            }
         } else {
             const invocationId = this.invocationId;
             this.invocationId++;
 
-            return {
-                arguments: args,
-                invocationId: invocationId.toString(),
-                streamIds,
-                target: methodName,
-                type: MessageType.Invocation,
-            };
+            if (streamIds.length !== 0) {
+                return {
+                    arguments: args,
+                    invocationId: invocationId.toString(),
+                    streamIds,
+                    target: methodName,
+                    type: MessageType.Invocation,
+                };
+            } else {
+                return {
+                    arguments: args,
+                    invocationId: invocationId.toString(),
+                    target: methodName,
+                    type: MessageType.Invocation,
+                };
+            }
         }
     }
 
@@ -889,13 +920,22 @@ export class HubConnection {
         const invocationId = this.invocationId;
         this.invocationId++;
 
-        return {
-            arguments: args,
-            invocationId: invocationId.toString(),
-            streamIds,
-            target: methodName,
-            type: MessageType.StreamInvocation,
-        };
+        if (streamIds.length !== 0) {
+            return {
+                arguments: args,
+                invocationId: invocationId.toString(),
+                streamIds,
+                target: methodName,
+                type: MessageType.StreamInvocation,
+            };
+        } else {
+            return {
+                arguments: args,
+                invocationId: invocationId.toString(),
+                target: methodName,
+                type: MessageType.StreamInvocation,
+            };
+        }
     }
 
     private createCancelInvocation(id: string): CancelInvocationMessage {

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Reflection;
@@ -89,12 +90,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
                             c.Configure(context.ServerOptions);
                         }
 
-                        // Prevent ListenOptions reuse. This is easily done accidentally when trying to debug a test by running it
-                        // in a loop, but will cause problems because only the app func from the first loop will ever be invoked.
-                        Assert.All(context.ServerOptions.ListenOptions, lo =>
-                            Assert.Equal(context.ExpectedConnectionMiddlewareCount, lo._middleware.Count));
-
-                        return new KestrelServer(sp.GetRequiredService<IConnectionListenerFactory>(), context);
+                        return new KestrelServer(new List<IConnectionListenerFactory>() { sp.GetRequiredService<IConnectionListenerFactory>() }, context);
                     });
                     configureServices(services);
                 })

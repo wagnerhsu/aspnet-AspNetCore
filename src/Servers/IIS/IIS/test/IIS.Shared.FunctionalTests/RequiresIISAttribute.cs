@@ -7,7 +7,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Xml.Linq;
-using Microsoft.AspNetCore.Testing.xunit;
+using Microsoft.AspNetCore.Testing;
 using Microsoft.Win32;
 
 namespace Microsoft.AspNetCore.Server.IIS.FunctionalTests
@@ -60,6 +60,11 @@ namespace Microsoft.AspNetCore.Server.IIS.FunctionalTests
             }
 
             var ancmConfigPath = Path.Combine(Environment.SystemDirectory, "inetsrv", "config", "schema", "aspnetcore_schema.xml");
+
+            if (!File.Exists(ancmConfigPath))
+            {
+                ancmConfigPath = Path.Combine(Environment.SystemDirectory, "inetsrv", "config", "schema", "aspnetcore_schema_v2.xml");
+            }
 
             if (!File.Exists(ancmConfigPath) && !SkipInVSTSAttribute.RunningInVSTS)
             {

@@ -4,7 +4,6 @@
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.E2ETesting;
 using Microsoft.AspNetCore.Testing;
-using Microsoft.AspNetCore.Testing.xunit;
 using Templates.Test.Helpers;
 using Xunit;
 using Xunit.Abstractions;
@@ -18,16 +17,19 @@ namespace Templates.Test.SpaTemplateTest
         {
         }
 
-        [Fact]
+        [ConditionalFact]
+        [SkipOnHelix("selenium")]
         public Task ReactTemplate_Works_NetCore()
             => SpaTemplateImplAsync("reactnoauth", "react", useLocalDb: false, usesAuth: false);
 
-        [Fact]
-        [Flaky("https://github.com/aspnet/AspNetCore-Internal/issues/2243", FlakyOn.All)]
+        [QuarantinedTest]
+        [ConditionalFact(Skip="This test run for over an hour")]
+        [SkipOnHelix("selenium")]
         public Task ReactTemplate_IndividualAuth_NetCore()
             => SpaTemplateImplAsync("reactindividual", "react", useLocalDb: false, usesAuth: true);
 
-        [Fact]
+        [ConditionalFact]
+        [SkipOnHelix("selenium")]
         public Task ReactTemplate_IndividualAuth_NetCore_LocalDb()
             => SpaTemplateImplAsync("reactindividualuld", "react", useLocalDb: true, usesAuth: true);
     }
